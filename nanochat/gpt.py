@@ -557,7 +557,7 @@ class GPT(nn.Module):
         scalars = self.resid_lambdas.numel() + self.x0_lambdas.numel() + self.smear_gate.weight.numel() + self.smear_lambda.numel() + self.backout_lambda.numel()
         total = wte + value_embeds + lm_head + transformer_matrices + scalars
         assert total == sum(p.numel() for p in self.parameters()), "Parameter count mismatch"
-        # Break down engram params for reporting
+        # Break down engram params for reporting (note: these are a subset of transformer_matrices)
         engram_params = 0
         for block in self.transformer.h:
             if block.engram is not None:
@@ -566,9 +566,9 @@ class GPT(nn.Module):
             'wte': wte,
             'value_embeds': value_embeds,
             'lm_head': lm_head,
-            'transformer_matrices': transformer_matrices,
+            'transformer_matrices': transformer_matrices,  # includes engram params
             'scalars': scalars,
-            'engram': engram_params,
+            'engram': engram_params,  # subset of transformer_matrices, not additive
             'total': total,
         }
 
@@ -584,18 +584,14 @@ class GPT(nn.Module):
         resid_params = [self.resid_lambdas]
         x0_params = [self.x0_lambdas]
         smear_params = [self.smear_gate.weight, self.smear_lambda, self.backout_lambda]
-        # Engram: extract embed weights (-> AdamW) and matrix weights (already in matrix_params)
+        # Engram: extract embed weights (-> AdamW); all other engram params are already in matrix_params
         engram_embed_params = []
-        engram_matrix_params_set = set()
         for block in self.transformer.h:
             if block.engram is not None:
                 em = block.engram
                 for tables_n in em.embed_tables:
                     for t in tables_n:
                         engram_embed_params.append(t.weight)
-                engram_matrix_params_set.add(id(em.key_proj.weight))
-                engram_matrix_params_set.add(id(em.value_proj.weight))
-                engram_matrix_params_set.add(id(em.short_conv.weight))
         assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params) + len(value_embeds_params) + len(resid_params) + len(x0_params) + len(smear_params)
 
         # Scale the LR for the AdamW parameters by ∝1/√dmodel (tuned for 768 dim model)
@@ -618,7 +614,7 @@ class GPT(nn.Module):
         muon_params = [p for p in matrix_params if id(p) not in engram_embed_ids and p.dim() == 2 and p.requires_grad]
         if engram_embed_params:
             param_groups.append(dict(kind='adamw', params=engram_embed_params, lr=embedding_lr * dmodel_lr_scale * 5, betas=(0.8, 0.995), eps=1e-10, weight_decay=0.0))
-        # Non-2D engram params (conv weights, hash seeds) go to AdamW
+        # Non-2D engram params (conv weights) go to AdamW
         non_matrix_engram = [p for p in matrix_params if id(p) not in engram_embed_ids and id(p) not in {id(mp) for mp in muon_params}]
         if non_matrix_engram:
             param_groups.append(dict(kind='adamw', params=non_matrix_engram, lr=embedding_lr * dmodel_lr_scale, betas=(0.8, 0.995), eps=1e-10, weight_decay=0.0))
